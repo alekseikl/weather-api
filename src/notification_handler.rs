@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use futures_lite::stream::StreamExt;
 use lapin::{
     Channel, Connection,
     options::{
@@ -9,6 +8,7 @@ use lapin::{
     },
     types::FieldTable,
 };
+use tokio_stream::StreamExt;
 use tracing::{error, info};
 
 pub struct NotificationHandler {
@@ -17,7 +17,7 @@ pub struct NotificationHandler {
 }
 
 impl NotificationHandler {
-    pub async fn new(connection: &Connection) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+    pub async fn new(connection: &Connection) -> anyhow::Result<Arc<Self>> {
         let channel = connection.create_channel().await?;
 
         channel
@@ -56,7 +56,7 @@ impl NotificationHandler {
         }))
     }
 
-    pub async fn listen(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run(&self) -> anyhow::Result<()> {
         let mut consumer = self
             .channel
             .basic_consume(
