@@ -16,13 +16,13 @@ use uuid::Uuid;
 
 const QUEUE_NAME: &str = "weather-rpc";
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct Point {
     pub lat: f32,
     pub lon: f32,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct Location {
     pub id: i32,
     pub name: String,
