@@ -3,6 +3,7 @@ use async_rs::Runtime;
 use lapin::{Connection, ConnectionProperties};
 use notification_handler::NotificationHandler;
 use rpc_client::RpcClient;
+use sqlx::postgres::PgPoolOptions;
 use tracing::error;
 
 use crate::api::ApiServer;
@@ -15,14 +16,17 @@ mod rpc_client;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let runtime = Runtime::tokio_current();
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect("postgres://try-loco:try-loco-pwd@localhost/weather")
+        .await?;
 
     let amqp_conn = Connection::connect_with_runtime(
         "amqp://127.0.0.1:5672",
         ConnectionProperties::default()
             .enable_auto_recover()
             .with_connection_name("weather-api".into()),
-        runtime.clone(),
+        Runtime::tokio_current().clone(),
     )
     .await?;
 
