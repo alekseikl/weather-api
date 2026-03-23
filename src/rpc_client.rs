@@ -23,6 +23,7 @@ pub struct Point {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct Location {
     pub id: i32,
     pub name: String,

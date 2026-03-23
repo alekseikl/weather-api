@@ -1,3 +1,7 @@
+use argon2::{
+    Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version,
+    password_hash::{SaltString, rand_core::OsRng},
+};
 use axum::{
     Json, Router,
     extract::{FromRequestParts, Path, State},
@@ -13,6 +17,7 @@ use axum_extra::{
 use chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
@@ -29,8 +34,10 @@ struct AuthResponse {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Claims {
-    sub: String,
+    user_id: i32,
+    email: String,
     exp: usize,
 }
 
@@ -52,8 +59,14 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentUser {
 }
 
 #[derive(Deserialize)]
+struct RegisterRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
 struct LoginRequest {
-    username: String,
+    email: String,
     password: String,
 }
 
@@ -68,6 +81,7 @@ pub fn router(state: AppState) -> Router {
         ));
 
     Router::new()
+        .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .merge(protected)
         .layer(TraceLayer::new_for_http())
@@ -75,17 +89,115 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+pub fn hash_password(pass: &str) -> Option<String> {
+    let arg2 = Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        Params::default(),
+    );
+    let salt = SaltString::generate(&mut OsRng);
+
+    arg2.hash_password(pass.as_bytes(), &salt)
+        .ok()
+        .map(|hash| hash.to_string())
+}
+
+pub fn verify_password(pass: &str, hashed_password: &str) -> bool {
+    let arg2 = Argon2::new(
+        argon2::Algorithm::Argon2id,
+        Version::V0x13,
+        Params::default(),
+    );
+    let Ok(hash) = PasswordHash::new(hashed_password) else {
+        return false;
+    };
+
+    arg2.verify_password(pass.as_bytes(), &hash).is_ok()
+}
+
+async fn register(
+    State(state): State<AppState>,
+    Json(request): Json<RegisterRequest>,
+) -> ApiResult<()> {
+    let email = request.email.trim();
+    let password = request.password.trim();
+
+    if email.is_empty() {
+        return Err(ApiError::bad_request("Email required"));
+    }
+
+    if password.is_empty() {
+        return Err(ApiError::bad_request("Password required"));
+    }
+
+    let Ok(row_opt) = sqlx::query("SELECT id FROM users WHERE email = $1")
+        .bind(email)
+        .fetch_optional(&state.pool)
+        .await
+    else {
+        return Err(ApiError::internal());
+    };
+
+    if row_opt.is_some() {
+        return Err(ApiError::bad_request("User exists"));
+    }
+
+    let Some(pwd_hash) = hash_password(password) else {
+        return Err(ApiError::internal());
+    };
+
+    if sqlx::query("INSERT INTO users (email, password) VALUES ($1, $2)")
+        .bind(email)
+        .bind(pwd_hash)
+        .execute(&state.pool)
+        .await
+        .is_err()
+    {
+        return Err(ApiError::internal());
+    }
+
+    Ok(Json(()))
+}
+
 async fn login(
     State(state): State<AppState>,
-    Json(payload): Json<LoginRequest>,
+    Json(request): Json<LoginRequest>,
 ) -> ApiResult<AuthResponse> {
-    if payload.username != "admin" || payload.password != "password" {
-        return Err(ApiError::unauthorized("Invalid credentials"));
+    let email = request.email.trim();
+    let password = request.password.trim();
+
+    if email.is_empty() {
+        return Err(ApiError::bad_request("Email required"));
+    }
+
+    if password.is_empty() {
+        return Err(ApiError::bad_request("Password required"));
+    }
+
+    let Ok(row_opt) = sqlx::query("SELECT id, email, password FROM users WHERE email = $1")
+        .bind(email)
+        .fetch_optional(&state.pool)
+        .await
+    else {
+        return Err(ApiError::internal());
+    };
+
+    let Some(row) = row_opt else {
+        return Err(ApiError::bad_request("Wrong email/password"));
+    };
+
+    let user_id: i32 = row.get("id");
+    let email: &str = row.get("email");
+    let hashed_password: &str = row.get("password");
+
+    if !verify_password(password, hashed_password) {
+        return Err(ApiError::bad_request("Wrong email/password"));
     }
 
     let expiration = Utc::now() + Duration::hours(24);
     let claims = Claims {
-        sub: payload.username,
+        user_id,
+        email: email.into(),
         exp: expiration.timestamp() as usize,
     };
 
@@ -95,7 +207,7 @@ async fn login(
         &EncodingKey::from_secret(state.jwt_secret.as_bytes()),
     ) {
         Ok(token) => Ok(Json(AuthResponse { token })),
-        Err(_) => Err(ApiError::new("Failed to create token")),
+        Err(_) => Err(ApiError::internal()),
     }
 }
 
@@ -114,7 +226,7 @@ async fn auth_middleware(
     match token_data {
         Ok(data) => {
             request.extensions_mut().insert(CurrentUser {
-                username: data.claims.sub,
+                username: data.claims.email,
             });
             Ok(next.run(request).await)
         }

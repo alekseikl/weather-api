@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
+use sqlx::PgPool;
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -12,10 +13,11 @@ mod router;
 pub struct ApiServer {
     listener: TcpListener,
     rpc_client: Arc<RpcClient>,
+    pool: PgPool,
 }
 
 impl ApiServer {
-    pub async fn new(rpc_client: Arc<RpcClient>) -> anyhow::Result<Self> {
+    pub async fn new(rpc_client: Arc<RpcClient>, pool: PgPool) -> anyhow::Result<Self> {
         let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
         let listener = TcpListener::bind(&listen_addr).await?;
 
@@ -24,6 +26,7 @@ impl ApiServer {
         Ok(Self {
             listener,
             rpc_client,
+            pool,
         })
     }
 
@@ -33,6 +36,7 @@ impl ApiServer {
 
         let app_state = AppState {
             rpc_client: self.rpc_client,
+            pool: self.pool,
             jwt_secret,
         };
 
@@ -70,6 +74,13 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    pub fn internal() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "Internal server error".into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -95,5 +106,6 @@ type ApiResult<T> = Result<Json<T>, ApiError>;
 #[derive(Clone)]
 pub struct AppState {
     pub rpc_client: Arc<RpcClient>,
+    pub pool: PgPool,
     pub jwt_secret: String,
 }

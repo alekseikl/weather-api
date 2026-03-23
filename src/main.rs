@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
 
     let notifications = NotificationHandler::new(&amqp_conn).await?;
     let rpc_client = RpcClient::new(&amqp_conn).await?;
-    let api_server = ApiServer::new(rpc_client.clone()).await?;
+    let api_server = ApiServer::new(rpc_client.clone(), pool.clone()).await?;
 
     let notifications_handle = tokio::spawn({
         let notifications = notifications.clone();
