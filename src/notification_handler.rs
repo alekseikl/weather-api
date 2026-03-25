@@ -1,13 +1,13 @@
-use std::sync::Arc;
-
 use lapin::{
     Channel, Connection,
+    message::Delivery,
     options::{
         BasicAckOptions, BasicConsumeOptions, ExchangeDeclareOptions, QueueBindOptions,
         QueueDeclareOptions,
     },
     types::FieldTable,
 };
+use tokio::{select, sync::broadcast};
 use tokio_stream::StreamExt;
 use tracing::{error, info};
 
@@ -17,7 +17,7 @@ pub struct NotificationHandler {
 }
 
 impl NotificationHandler {
-    pub async fn new(connection: &Connection) -> anyhow::Result<Arc<Self>> {
+    pub async fn new(connection: &Connection) -> anyhow::Result<Self> {
         let channel = connection.create_channel().await?;
 
         channel
@@ -50,13 +50,22 @@ impl NotificationHandler {
             )
             .await?;
 
-        Ok(Arc::new(Self {
+        Ok(Self {
             channel,
             queue_name: queue.name().to_string(),
-        }))
+        })
     }
 
-    pub async fn run(&self) -> anyhow::Result<()> {
+    async fn process_delivery(&self, delivery: Delivery) {
+        let payload = String::from_utf8_lossy(&delivery.data);
+        info!(routing_key = %delivery.routing_key, payload = %payload, "Received weather event");
+
+        if delivery.ack(BasicAckOptions::default()).await.is_err() {
+            error!("Failed to ack delivery");
+        }
+    }
+
+    pub async fn run(self, mut shutdown_rx: broadcast::Receiver<()>) -> anyhow::Result<()> {
         let mut consumer = self
             .channel
             .basic_consume(
@@ -69,18 +78,23 @@ impl NotificationHandler {
 
         info!("Listening for messages on weather.events exchange");
 
-        while let Some(delivery) = consumer.next().await {
-            match delivery {
-                Ok(delivery) => {
-                    let payload = String::from_utf8_lossy(&delivery.data);
-                    info!(routing_key = %delivery.routing_key, payload = %payload, "Received weather event");
-                    delivery.ack(BasicAckOptions::default()).await?;
-                }
-                Err(e) => {
-                    error!(error = %e, "Error receiving message");
+        let run_loop = async {
+            while let Some(delivery) = consumer.next().await {
+                match delivery {
+                    Ok(delivery) => {
+                        self.process_delivery(delivery).await;
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Error receiving message");
+                    }
                 }
             }
-        }
+        };
+
+        select! {
+            _ = run_loop => {},
+            _ = shutdown_rx.recv() => {}
+        };
 
         Ok(())
     }

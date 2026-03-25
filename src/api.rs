@@ -1,11 +1,11 @@
-use std::env;
 use std::sync::Arc;
+use std::{env, error::Error};
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 use sqlx::PgPool;
-use tokio::net::TcpListener;
-use tracing::info;
+use tokio::{net::TcpListener, sync::broadcast};
+use tracing::{error, info};
 
 use crate::{api::router::router, rpc_client::RpcClient};
 
@@ -30,7 +30,7 @@ impl ApiServer {
         })
     }
 
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self, mut shutdown_rx: broadcast::Receiver<()>) -> anyhow::Result<()> {
         let jwt_secret =
             env::var("JWT_SECRET").unwrap_or_else(|_| "super-secret-change-me".to_string());
 
@@ -41,8 +41,12 @@ impl ApiServer {
         };
 
         let app = router(app_state);
+        let shutdown_signal = async move {
+            let _ = shutdown_rx.recv().await;
+        };
 
         axum::serve(self.listener, app)
+            .with_graceful_shutdown(shutdown_signal)
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
@@ -98,6 +102,20 @@ impl IntoResponse for ApiError {
             }),
         )
             .into_response()
+    }
+}
+
+impl<E> From<E> for ApiError
+where
+    E: Error,
+{
+    fn from(err: E) -> Self {
+        error!(error = %err, "Unhandled internal error");
+
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "Internal server error".into(),
+        }
     }
 }
 

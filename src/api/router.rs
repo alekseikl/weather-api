@@ -7,7 +7,7 @@ use axum::{
     extract::{FromRequestParts, Path, State},
     http::request::Parts,
     middleware,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use axum_extra::{
@@ -18,6 +18,7 @@ use chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use tokio::time;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
@@ -130,15 +131,12 @@ async fn register(
         return Err(ApiError::bad_request("Password required"));
     }
 
-    let Ok(row_opt) = sqlx::query("SELECT id FROM users WHERE email = $1")
+    if sqlx::query("SELECT id FROM users WHERE email = $1")
         .bind(email)
         .fetch_optional(&state.pool)
-        .await
-    else {
-        return Err(ApiError::internal());
-    };
-
-    if row_opt.is_some() {
+        .await?
+        .is_some()
+    {
         return Err(ApiError::bad_request("User exists"));
     }
 
@@ -146,15 +144,11 @@ async fn register(
         return Err(ApiError::internal());
     };
 
-    if sqlx::query("INSERT INTO users (email, password) VALUES ($1, $2)")
+    sqlx::query("INSERT INTO users (email, password) VALUES ($1, $2)")
         .bind(email)
         .bind(pwd_hash)
         .execute(&state.pool)
-        .await
-        .is_err()
-    {
-        return Err(ApiError::internal());
-    }
+        .await?;
 
     Ok(Json(()))
 }
@@ -174,15 +168,11 @@ async fn login(
         return Err(ApiError::bad_request("Password required"));
     }
 
-    let Ok(row_opt) = sqlx::query("SELECT id, email, password FROM users WHERE email = $1")
+    let Some(row) = sqlx::query("SELECT id, email, password FROM users WHERE email = $1")
         .bind(email)
         .fetch_optional(&state.pool)
-        .await
+        .await?
     else {
-        return Err(ApiError::internal());
-    };
-
-    let Some(row) = row_opt else {
         return Err(ApiError::bad_request("Wrong email/password"));
     };
 
@@ -201,14 +191,12 @@ async fn login(
         exp: expiration.timestamp() as usize,
     };
 
-    match encode(
+    encode(
         &Header::default(),
         &claims,
         &EncodingKey::from_secret(state.jwt_secret.as_bytes()),
-    ) {
-        Ok(token) => Ok(Json(AuthResponse { token })),
-        Err(_) => Err(ApiError::internal()),
-    }
+    )
+    .map(|token| Ok(Json(AuthResponse { token })))?
 }
 
 async fn auth_middleware(
@@ -216,22 +204,18 @@ async fn auth_middleware(
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
     mut request: axum::http::Request<axum::body::Body>,
     next: middleware::Next,
-) -> impl IntoResponse {
+) -> Result<Response, ApiError> {
     let token_data = decode::<Claims>(
         auth.token(),
         &DecodingKey::from_secret(state.jwt_secret.as_bytes()),
         &Validation::default(),
-    );
+    )
+    .map_err(|_| ApiError::unauthorized("Invalid or expired token"))?;
 
-    match token_data {
-        Ok(data) => {
-            request.extensions_mut().insert(CurrentUser {
-                username: data.claims.email,
-            });
-            Ok(next.run(request).await)
-        }
-        Err(_) => Err(ApiError::unauthorized("Invalid or expired token")),
-    }
+    request.extensions_mut().insert(CurrentUser {
+        username: token_data.claims.email,
+    });
+    Ok(next.run(request).await)
 }
 
 async fn me(user: CurrentUser) -> impl IntoResponse {
@@ -244,13 +228,15 @@ async fn get_locations(
 ) -> ApiResult<Vec<Location>> {
     info!(username = %user.username, "Fetching all locations");
 
-    match state.rpc_client.get_locations().await {
-        Ok(locations) => Ok(Json(locations)),
-        Err(e) => {
-            error!(error = %e, "Failed to fetch locations");
-            Err(ApiError::new("Failed to fetch locations"))
-        }
-    }
+    time::sleep(std::time::Duration::from_secs(10)).await;
+
+    Ok(Json(
+        state
+            .rpc_client
+            .get_locations()
+            .await
+            .map_err(|_| ApiError::new("Failed to fetch locations"))?,
+    ))
 }
 
 async fn get_location(
