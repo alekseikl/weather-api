@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use argon2::{
     Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version,
     password_hash::{SaltString, rand_core::OsRng},
@@ -71,7 +73,7 @@ struct LoginRequest {
     password: String,
 }
 
-pub fn router(state: AppState) -> Router {
+pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .route("/auth/me", get(me))
         .route("/locations", get(get_locations))
@@ -117,7 +119,7 @@ pub fn verify_password(pass: &str, hashed_password: &str) -> bool {
 }
 
 async fn register(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Json(request): Json<RegisterRequest>,
 ) -> ApiResult<()> {
     let email = request.email.trim();
@@ -154,7 +156,7 @@ async fn register(
 }
 
 async fn login(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Json(request): Json<LoginRequest>,
 ) -> ApiResult<AuthResponse> {
     let email = request.email.trim();
@@ -200,7 +202,7 @@ async fn login(
 }
 
 async fn auth_middleware(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
     mut request: axum::http::Request<axum::body::Body>,
     next: middleware::Next,
@@ -224,7 +226,7 @@ async fn me(user: CurrentUser) -> impl IntoResponse {
 
 async fn get_locations(
     user: CurrentUser,
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
 ) -> ApiResult<Vec<Location>> {
     info!(username = %user.username, "Fetching all locations");
 
@@ -241,7 +243,7 @@ async fn get_locations(
 
 async fn get_location(
     user: CurrentUser,
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<i32>,
 ) -> ApiResult<Location> {
     info!(username = %user.username, location_id = id, "Fetching location");

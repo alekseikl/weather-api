@@ -40,7 +40,7 @@ impl ApiServer {
             jwt_secret,
         };
 
-        let app = router(app_state);
+        let app = router(Arc::new(app_state));
         let shutdown_signal = async move {
             let _ = shutdown_rx.recv().await;
         };
